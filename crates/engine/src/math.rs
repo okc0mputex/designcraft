@@ -80,6 +80,8 @@ enum Node {
     Op(String, bool),
     /// `\left( … \right)`: delimiters sized to the content.
     Fenced(String, Box<Node>, String),
+    /// Any other `\underset` base (`\frac{a}{b}`, `x`): laid out as itself, limits stacked.
+    Stacked(Box<Node>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -469,8 +471,8 @@ fn parse_at(src: &str, depth: usize, display: bool) -> Node {
     Node::Group(p.list(None))
 }
 
-/// The base of `\underset{under}{base}`: a named operator (`\underset{x\to 0}{\lim}`) or
-/// anything else, upright, with `under` stacked below it.
+/// The base of `\underset{under}{base}`: a named operator (`\underset{x\to 0}{\lim}`), upright
+/// text (`\mathrm{arg}`), or anything else laid out as itself, with `under` stacked below it.
 fn stack_base(base: Node) -> Node {
     match base {
         Node::Op(name, _) => Node::Op(name, true),
@@ -479,16 +481,8 @@ fn stack_base(base: Node) -> Node {
             Some(n) => stack_base(n),
             None => Node::Group(v),
         },
-        other => Node::Op(text_of(&other), true),
-    }
-}
-
-/// The text a node spells (for an `\underset` base like `\mathrm{arg\,min}`).
-fn text_of(n: &Node) -> String {
-    match n {
-        Node::Op(s, _) | Node::Text(s) | Node::Sym(s, _) | Node::Big(s, _) => s.clone(),
-        Node::Group(v) => v.iter().map(text_of).collect(),
-        _ => String::new(),
+        Node::Text(s) => Node::Op(s, true),
+        other => Node::Stacked(Box::new(other)),
     }
 }
 
@@ -544,6 +538,7 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
         Node::Sym(s, cl) => text_box(f, s, size, *cl == Class::Ident),
         Node::Text(s) | Node::Op(s, _) => text_box(f, s, size, false),
         Node::Space(em) => MBox { w: em * size, ..Default::default() },
+        Node::Stacked(b) => layout(f, b, size),
         Node::Group(list) => {
             let mut parts = Vec::new();
             let mut prev: Option<Class> = None;
@@ -632,7 +627,7 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
             b
         }
         Node::Scripts { base, sup, sub } => {
-            let big = matches!(&**base, Node::Big(_, true) | Node::Op(_, true));
+            let big = matches!(&**base, Node::Big(_, true) | Node::Op(_, true) | Node::Stacked(_));
             let b = layout(f, base, size);
             let s2 = size * 0.7;
             let (bw, basc, bdesc) = (b.w, b.asc, b.desc);
@@ -844,6 +839,11 @@ mod tests {
         assert!(stacked > inline + 2.0, "{inline} {stacked}");
         assert!((display - stacked).abs() < 0.01, "{display} {stacked}");
         assert_eq!(to_svg(r"\lim_{x} x", 12.0).1, to_svg_with(r"\lim_{x} x", 12.0, &Options::default()).1);
+        // Any other `\underset` base keeps its own layout: the fraction is set, with `x` under it.
+        let (svg, (_, uh)) = to_svg(r"\underset{x}{\frac{a}{b}}", 12.0);
+        let svg = String::from_utf8(svg).unwrap();
+        assert!(svg.contains(">a<") && svg.contains(">b<") && svg.contains(">x<"), "{svg}");
+        assert!(uh > to_svg(r"\frac{a}{b}", 12.0).1.1 + 2.0, "{uh}");
     }
 
     #[test]
