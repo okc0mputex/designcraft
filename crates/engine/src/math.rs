@@ -1,7 +1,10 @@
 //! Math expressions: a LaTeX subset typeset into boxes and written as SVG (text in the bundled
 //! serif, rules and radicals as paths). Covers fractions, super/subscripts, square and n-th roots,
 //! big operators with limits, Greek letters, common symbols, `\text{}`, `\mathrm{}`, spacing
-//! commands and `\left( … \right)`.
+//! commands and `\left( … \right)`, set-builder and logic symbols, `\mathbb{}` and the usual
+//! operator names. Symbols the bundled serif lacks come from the bundled sans, then the bundled
+//! monospace (which covers ℝ ∘ ∪ ⌊ ⟨ ∀ ∅ ⋮ …); an installed DejaVu Serif is used only for what
+//! no bundled font has.
 
 use std::fmt::Write as _;
 
@@ -72,6 +75,8 @@ enum Node {
         sub: Option<Box<Node>>,
     },
     Text(String),
+    /// An operator name (`sin`, `log`, `lim`, …), upright, followed by a thin space.
+    OpName(String),
     Space(f64),
     /// A big operator (∑ ∏ ∫): drawn larger, limits as scripts.
     Big(String),
@@ -137,8 +142,36 @@ fn symbol(name: &str) -> Option<(&'static str, Class)> {
         "equiv" => ("≡", Rel),
         "to" | "rightarrow" => ("→", Rel),
         "leftarrow" => ("←", Rel),
-        "Rightarrow" => ("⇒", Rel),
+        "Rightarrow" | "implies" => ("⇒", Rel),
+        "iff" | "Leftrightarrow" => ("⇔", Rel),
+        "mapsto" => ("↦", Rel),
         "in" => ("∈", Rel),
+        "notin" => ("∉", Rel),
+        "mid" => ("|", Rel),
+        "subset" => ("⊂", Rel),
+        "subseteq" => ("⊆", Rel),
+        "sim" => ("∼", Rel),
+        "circ" => ("∘", Bin),
+        "cap" => ("∩", Bin),
+        "cup" => ("∪", Bin),
+        "setminus" => ("∖", Bin),
+        "ast" => ("∗", Bin),
+        "emptyset" | "varnothing" => ("∅", Plain),
+        "lfloor" => ("⌊", Plain),
+        "rfloor" => ("⌋", Plain),
+        "lceil" => ("⌈", Plain),
+        "rceil" => ("⌉", Plain),
+        "langle" => ("⟨", Plain),
+        "rangle" => ("⟩", Plain),
+        "vert" => ("|", Plain),
+        "Vert" => ("‖", Plain),
+        "forall" => ("∀", Plain),
+        "exists" => ("∃", Plain),
+        "neg" | "lnot" => ("¬", Plain),
+        "angle" => ("∠", Plain),
+        "triangle" => ("△", Plain),
+        "ell" => ("ℓ", Ident),
+        "vdots" => ("⋮", Plain),
         "infty" => ("∞", Plain),
         "partial" => ("∂", Plain),
         "nabla" => ("∇", Plain),
@@ -297,7 +330,9 @@ impl Parser<'_> {
                         Node::Sqrt(idx, Box::new(a))
                     }
                     "text" | "mathrm" | "textrm" | "operatorname" => Node::Text(self.raw_group()),
-                    "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "lim" | "max" | "min" => Node::Text(name),
+                    "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "arcsin" | "arccos" | "arctan" | "sinh" | "cosh" | "tanh" | "coth" | "log"
+                    | "lg" | "ln" | "exp" | "det" | "deg" | "dim" | "gcd" | "ker" | "arg" | "lim" | "max" | "min" => Node::OpName(name),
+                    "mathbb" => Node::Sym(self.raw_group().chars().map(double_struck).collect(), Class::Plain),
                     "," => Node::Space(3.0 / 18.0),
                     ":" | ">" => Node::Space(4.0 / 18.0),
                     ";" => Node::Space(5.0 / 18.0),
@@ -438,22 +473,52 @@ fn parse_at(src: &str, depth: usize) -> Node {
     Node::Group(p.list(None))
 }
 
+/// `\mathbb` letters: the letterlike ℝ ℕ ℤ ℚ ℂ ℙ ℍ, other capitals from the Mathematical
+/// Alphanumeric Symbols block; anything else unchanged.
+fn double_struck(c: char) -> char {
+    match c {
+        'R' => 'ℝ',
+        'N' => 'ℕ',
+        'Z' => 'ℤ',
+        'Q' => 'ℚ',
+        'C' => 'ℂ',
+        'P' => 'ℙ',
+        'H' => 'ℍ',
+        'A'..='Z' => char::from_u32(0x1D538 + (c as u32 - 'A' as u32)).unwrap_or(c),
+        c => c,
+    }
+}
+
 /// Typesetting fonts and metrics.
 struct Fonts {
     upright: std::sync::Arc<FontFace>,
     italic: std::sync::Arc<FontFace>,
-    fallback: std::sync::Arc<FontFace>,
+    /// Faces tried in order for a character the serif lacks, with their family names.
+    fallbacks: Vec<(&'static str, std::sync::Arc<FontFace>)>,
 }
 
 impl Fonts {
-    fn face(&self, c: char, italic: bool) -> &FontFace {
+    fn new(db: &FontDb) -> Fonts {
+        let fallbacks =
+            FALLBACKS.iter().filter(|(fam, _, bundled)| *bundled || db.has_family(fam)).map(|&(fam, style, _)| (fam, db.face(fam, style))).collect();
+        Fonts { upright: db.face(FAMILY, "Regular"), italic: db.face(FAMILY, "Italic"), fallbacks }
+    }
+    /// The face that draws `c` and its family name, and whether it is the italic serif. A
+    /// character no face has stays with the serif (which draws its missing-glyph box).
+    fn face(&self, c: char, italic: bool) -> (&str, &FontFace, bool) {
         let f = if italic { &self.italic } else { &self.upright };
-        if f.glyph_for(c) != 0 { f } else { &self.fallback }
+        if f.glyph_for(c) != 0 {
+            return (FAMILY, f, italic);
+        }
+        match self.fallbacks.iter().find(|(_, ff)| ff.glyph_for(c) != 0) {
+            Some((fam, ff)) => (fam, ff, false),
+            None => (FAMILY, f, italic),
+        }
     }
     fn width(&self, s: &str, size: f64, italic: bool) -> f64 {
         s.chars()
             .map(|c| {
-                let f = self.face(c, italic);
+                let (_, f, _) = self.face(c, italic);
                 f.advance(f.glyph_for(c)) / f.units_per_em().max(1.0) * size
             })
             .sum()
@@ -461,7 +526,9 @@ impl Fonts {
 }
 
 const FAMILY: &str = designcraft_fonts::DEFAULT_FAMILY;
-const FALLBACK: &str = "Source Sans 3";
+/// Fallback faces in order: (family, style, bundled). The bundled ones are always there (in
+/// the browser too), so output only depends on an installed font for a symbol none of them has.
+const FALLBACKS: [(&str, &str, bool); 3] = [("Source Sans 3", "Regular", true), ("JetBrains Mono", "Regular", true), ("DejaVu Serif", "Book", false)];
 
 fn text_box(f: &Fonts, s: &str, size: f64, italic: bool) -> MBox {
     let w = f.width(s, size, italic);
@@ -488,7 +555,7 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
     let axis = size * 0.25;
     match n {
         Node::Sym(s, cl) => text_box(f, s, size, *cl == Class::Ident),
-        Node::Text(s) => text_box(f, s, size, false),
+        Node::Text(s) | Node::OpName(s) => text_box(f, s, size, false),
         Node::Space(em) => MBox { w: em * size, ..Default::default() },
         Node::Group(list) => {
             let mut parts = Vec::new();
@@ -502,8 +569,14 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                     },
                     _ => None,
                 };
-                // A leading + or − (or after another operator) is a sign, not a binary operator.
-                let cl = if cl == Some(Class::Bin) && (k == 0 || matches!(prev, Some(Class::Bin | Class::Rel | Class::Punct))) {
+                let after_op = k.checked_sub(1).and_then(|j| list.get(j)).is_some_and(|n| match n {
+                    Node::OpName(_) => true,
+                    Node::Scripts { base, .. } => matches!(&**base, Node::OpName(_)),
+                    _ => false,
+                });
+                // A leading + or − (or after another operator, or an operator name) is a sign,
+                // not a binary operator.
+                let cl = if cl == Some(Class::Bin) && (k == 0 || after_op || matches!(prev, Some(Class::Bin | Class::Rel | Class::Punct))) {
                     Some(Class::Plain)
                 } else {
                     cl
@@ -518,6 +591,13 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                     before = 0.0;
                 }
                 if prev == Some(Class::Punct) {
+                    before = before.max(size * 3.0 / 18.0);
+                }
+                // A thin space after an operator name (`\sin x`, `\log_2 n`), as TeX's Op–Ord, but
+                // none before a relation, operator, punctuation or an opening delimiter (`\sin(x)`).
+                let opens = matches!(item, Node::Fenced(..))
+                    || matches!(item, Node::Sym(s, _) if matches!(s.as_str(), "(" | "[" | "{" | "⟨" | "⌊" | "⌈" | "|" | "‖"));
+                if after_op && !opens && !matches!(cl, Some(Class::Rel | Class::Bin | Class::Punct)) {
                     before = before.max(size * 3.0 / 18.0);
                 }
                 parts.push((layout(f, item, size), before));
@@ -656,8 +736,7 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
 
 /// Typeset `latex` at `size` points: SVG bytes and the size in points.
 pub fn to_svg(latex: &str, size: f64) -> (Vec<u8>, (f64, f64)) {
-    let db = FontDb::global();
-    let f = Fonts { upright: db.face(FAMILY, "Regular"), italic: db.face(FAMILY, "Italic"), fallback: db.face(FALLBACK, "Regular") };
+    let f = Fonts::new(FontDb::global());
     let b = layout(&f, &parse(latex), size);
     let pad = size * 0.1;
     let (w, h) = (b.w + 2.0 * pad, b.asc + b.desc + 2.0 * pad);
@@ -671,9 +750,7 @@ pub fn to_svg(latex: &str, size: f64) -> (Vec<u8>, (f64, f64)) {
                 // Per character, so each uses a face that has it.
                 let mut cx = *x;
                 for c in s.chars() {
-                    let face = f.face(c, *italic);
-                    let fam = if std::ptr::eq(face, &*f.fallback) { FALLBACK } else { FAMILY };
-                    let it = *italic && !std::ptr::eq(face, &*f.fallback);
+                    let (fam, _, it) = f.face(c, *italic);
                     let _ = write!(
                         svg,
                         "<text x=\"{:.3}\" y=\"{:.3}\" font-family=\"'{fam}'\" font-size=\"{size:.3}\"{}>{}</text>",
@@ -741,6 +818,45 @@ mod tests {
             let Node::Group(v) = parse(src) else { panic!() };
             assert!(matches!(&v[0], Node::Fenced(_, _, c) if c == close), "{src}: {v:?}");
         }
+    }
+
+    /// Every glyph written for the new symbols comes from a font that has it: the bundled ones
+    /// cover all but ∖ ∗ ∠, which only an installed DejaVu Serif adds.
+    #[test]
+    fn symbols_and_double_struck_letters() {
+        let src = r"\{x\in\mathbb{R}\mid x\notin\mathbb{Z}\} \cup A\cap B,\ f\circ g,\ \forall n\in\mathbb{N}\ \exists q\in\mathbb{Q}: \lfloor q\rfloor \le \lceil q\rceil,\ \langle u,v\rangle,\ A\subseteq B \iff \emptyset,\ \neg p \implies \vdots";
+        let s = String::from_utf8(to_svg(src, 12.0).0).unwrap();
+        for c in ["ℝ", "ℤ", "ℕ", "ℚ", "|", "∉", "∪", "∩", "∘", "∀", "∃", "⌊", "⌋", "⌈", "⌉", "⟨", "⟩", "⊆", "⇔", "∅", "¬", "⇒", "⋮"]
+        {
+            assert!(s.contains(&format!(">{c}<")), "{c}: {s}");
+        }
+        assert!(!s.contains(">\\<"), "an unknown command leaked: {s}");
+        let f = Fonts::new(FontDb::global());
+        for c in "ℝℤℕℚℂ∉∪∩∘∀∃⌊⌋⌈⌉⟨⟩⊆⇔∅¬⇒⋮↦∼ℓ".chars() {
+            let (fam, face, _) = f.face(c, false);
+            assert!(face.glyph_for(c) != 0 && fam != "DejaVu Serif", "{c} from {fam}");
+        }
+        assert_eq!(double_struck('A'), '𝔸');
+        assert_eq!(double_struck('x'), 'x');
+    }
+
+    /// Operator names are upright and followed by a thin space before an operand, not before a
+    /// delimiter, relation or a sign.
+    #[test]
+    fn operator_names_take_a_thin_space() {
+        let w = |src: &str| to_svg(src, 12.0).1.0;
+        let thin = 12.0 * 3.0 / 18.0;
+        for name in ["sin", "cot", "sec", "csc", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "det", "deg", "dim", "gcd", "log", "lim"] {
+            assert!(matches!(&parse(&format!("\\{name} x")), Node::Group(v) if v.first() == Some(&Node::OpName(name.into()))), "{name}");
+            let spaced = w(&format!("\\{name} x")) - w(&format!("\\{name}")) - w("x") + w("");
+            assert!((spaced - thin).abs() < 0.05, "{name}: {spaced}");
+        }
+        assert!((w(r"\sin(x)") - w(r"\sin") - w("(x)") + w("")).abs() < 0.05);
+        assert!((w(r"\sin\left(x\right)") - w(r"\sin") - w(r"\left(x\right)") + w("")).abs() < 0.05);
+        // `\sin -x`: the minus is a sign (no medium spaces around it).
+        assert!((w(r"\sin -x") - w(r"\sin") - w("-x") + w("") - thin).abs() < 0.05);
+        // `\text{}` is not an operator: no space after it.
+        assert!((w(r"\text{if}x") - w(r"\text{if}") - w("x") + w("")).abs() < 0.05);
     }
 
     #[test]
