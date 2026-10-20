@@ -2,9 +2,9 @@
 //! serif, rules and radicals as paths). Covers fractions, super/subscripts, square and n-th roots,
 //! big operators with limits, Greek letters, common symbols, `\text{}`, `\mathrm{}`, spacing
 //! commands and `\left( … \right)`, set-builder and logic symbols, `\mathbb{}` and the usual
-//! operator names. Symbols the bundled serif lacks come from the bundled sans, then the bundled
-//! monospace (which covers ℝ ∘ ∪ ⌊ ⟨ ∀ ∅ ⋮ …); an installed DejaVu Serif is used only for what
-//! no bundled font has.
+//! operator names. Symbols the bundled serif lacks come from an installed DejaVu Serif, then the
+//! bundled sans, then the bundled monospace (which covers ℝ ∘ ∪ ⌊ ⟨ ∀ ∅ …); `⋯` `⋮` `⋱` are built
+//! from the serif's own dots instead.
 
 use std::fmt::Write as _;
 
@@ -92,6 +92,9 @@ enum Class {
     Bin,
     /// Relation (= < ≤ →): thick space both sides.
     Rel,
+    /// A relation with an extra thick space each side (`\iff`, `\implies`, `\impliedby`), as
+    /// TeX's `\;\Longleftrightarrow\;`.
+    WideRel,
     Punct,
     Plain,
 }
@@ -142,8 +145,17 @@ fn symbol(name: &str) -> Option<(&'static str, Class)> {
         "equiv" => ("≡", Rel),
         "to" | "rightarrow" => ("→", Rel),
         "leftarrow" => ("←", Rel),
-        "Rightarrow" | "implies" => ("⇒", Rel),
-        "iff" | "Leftrightarrow" => ("⇔", Rel),
+        "Rightarrow" => ("⇒", Rel),
+        "Leftarrow" => ("⇐", Rel),
+        "Leftrightarrow" => ("⇔", Rel),
+        "Longrightarrow" => ("⟹", Rel),
+        "Longleftarrow" => ("⟸", Rel),
+        "Longleftrightarrow" => ("⟺", Rel),
+        "longrightarrow" => ("⟶", Rel),
+        "longleftarrow" => ("⟵", Rel),
+        "implies" => ("⟹", WideRel),
+        "impliedby" => ("⟸", WideRel),
+        "iff" => ("⟺", WideRel),
         "mapsto" => ("↦", Rel),
         "in" => ("∈", Rel),
         "notin" => ("∉", Rel),
@@ -172,6 +184,7 @@ fn symbol(name: &str) -> Option<(&'static str, Class)> {
         "triangle" => ("△", Plain),
         "ell" => ("ℓ", Ident),
         "vdots" => ("⋮", Plain),
+        "ddots" => ("⋱", Plain),
         "infty" => ("∞", Plain),
         "partial" => ("∂", Plain),
         "nabla" => ("∇", Plain),
@@ -553,10 +566,82 @@ fn hbox(parts: Vec<(MBox, f64)>) -> MBox {
     out
 }
 
+/// An operator name, bare or with scripts (`\cos`, `\cos^2`, `\log_2`).
+fn is_op(n: &Node) -> bool {
+    match n {
+        Node::OpName(_) => true,
+        Node::Scripts { base, .. } => matches!(&**base, Node::OpName(_)),
+        _ => false,
+    }
+}
+
+/// Whether the item before `list[k]` leaves no room for an operator's thin space: an opening
+/// delimiter, an explicit space (`\,\sin`, `\quad\lim`), or a bare `|` that opens a pair
+/// because it starts the list or follows a relation, operator, punctuation, opening delimiter
+/// or space (`|\sin x|`, `y=|\cos x|`). TeX would space the bar there; it reads as an opener.
+fn opens_before(list: &[Node], k: usize) -> bool {
+    let opener = |n: &Node| matches!(n, Node::Sym(s, _) if matches!(s.as_str(), "(" | "[" | "{" | "⟨" | "⌊" | "⌈"));
+    let Some(prev) = k.checked_sub(1).and_then(|j| list.get(j)) else { return true };
+    if opener(prev) || matches!(prev, Node::Space(_)) {
+        return true;
+    }
+    if !matches!(prev, Node::Sym(s, _) if s == "|") {
+        return false;
+    }
+    match k.checked_sub(2).and_then(|j| list.get(j)) {
+        None => true,
+        Some(n) => opener(n) || matches!(n, Node::Space(_) | Node::Sym(_, Class::Rel | Class::WideRel | Class::Bin | Class::Punct)),
+    }
+}
+
+/// A long arrow (`⟹` `⟸` `⟺`) when some face draws it, else the short one (`⇒` `⇐` `⇔`), so
+/// the bundled fonts alone never draw a missing-glyph box for `\iff`.
+fn long_arrow_or_short(f: &Fonts, s: &str) -> String {
+    let short = match s {
+        "⟹" => '⇒',
+        "⟸" => '⇐',
+        "⟺" => '⇔',
+        "⟶" => '→',
+        "⟵" => '←',
+        _ => return s.to_string(),
+    };
+    let drawn = s.chars().all(|c| {
+        let (_, face, _) = f.face(c, false);
+        face.glyph_for(c) != 0
+    });
+    if drawn { s.to_string() } else { short.to_string() }
+}
+
+/// `⋯` `⋮` `⋱` built from three dots of the upright serif, as TeX builds `\cdots`, `\vdots` and
+/// `\ddots`, when the serif has no such glyph (a fallback face would set them in another design).
+/// `None` for anything else, or when the serif has the glyph or no dot.
+fn built_dots(f: &Fonts, s: &str, size: f64) -> Option<MBox> {
+    let mut cs = s.chars();
+    let (Some(c), None) = (cs.next(), cs.next()) else { return None };
+    if !matches!(c, '⋯' | '⋮' | '⋱') || f.upright.glyph_for(c) != 0 {
+        return None;
+    }
+    let dot = if c == '⋯' { '·' } else { '.' };
+    if f.upright.glyph_for(dot) == 0 {
+        return None;
+    }
+    let dw = f.upright.advance(f.upright.glyph_for(dot)) / f.upright.units_per_em().max(1.0) * size;
+    let mu = size / 18.0;
+    // (x, raise) of each dot: TeX's \cdotp\cdotp\cdotp with thin spaces; \vdots 0.4 em apart;
+    // \ddots raised 7, 4 and 1 tenths of an em with 2 mu between.
+    let (pos, w, asc): ([(f64, f64); 3], f64, f64) = match c {
+        '⋯' => ([(0.0, 0.0), (dw + 3.0 * mu, 0.0), (2.0 * (dw + 3.0 * mu), 0.0)], 3.0 * dw + 6.0 * mu, size * 0.72),
+        '⋮' => ([(0.0, 0.0), (0.0, size * 0.4), (0.0, size * 0.8)], dw, size * 0.92),
+        _ => ([(mu, size * 0.7), (dw + 3.0 * mu, size * 0.4), (2.0 * dw + 5.0 * mu, size * 0.1)], 3.0 * dw + 6.0 * mu, size * 0.82),
+    };
+    let els = pos.iter().map(|&(x, r)| Elem::Text { x, y: -r, s: dot.to_string(), size, italic: false }).collect();
+    Some(MBox { w, asc, desc: size * 0.22, els })
+}
+
 fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
     let axis = size * 0.25;
     match n {
-        Node::Sym(s, cl) => text_box(f, s, size, *cl == Class::Ident),
+        Node::Sym(s, cl) => built_dots(f, s, size).unwrap_or_else(|| text_box(f, &long_arrow_or_short(f, s), size, *cl == Class::Ident)),
         Node::Text(s) | Node::OpName(s) => text_box(f, s, size, false),
         Node::Space(em) => MBox { w: em * size, ..Default::default() },
         Node::Group(list) => {
@@ -578,7 +663,9 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                 });
                 // A leading + or − (or after another operator, or an operator name) is a sign,
                 // not a binary operator.
-                let cl = if cl == Some(Class::Bin) && (k == 0 || after_op || matches!(prev, Some(Class::Bin | Class::Rel | Class::Punct))) {
+                let cl = if cl == Some(Class::Bin)
+                    && (k == 0 || after_op || matches!(prev, Some(Class::Bin | Class::Rel | Class::WideRel | Class::Punct)))
+                {
                     Some(Class::Plain)
                 } else {
                     cl
@@ -586,6 +673,7 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                 let gap = |c: Option<Class>| match c {
                     Some(Class::Bin) => size * 4.0 / 18.0,
                     Some(Class::Rel) => size * 5.0 / 18.0,
+                    Some(Class::WideRel) => size * 10.0 / 18.0,
                     _ => 0.0,
                 };
                 let mut before = gap(cl).max(gap(prev));
@@ -600,7 +688,13 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                 // `|` is an ordinary symbol in TeX, so `\log|x|` keeps the space (`\left|` does not).
                 let opens =
                     matches!(item, Node::Fenced(..)) || matches!(item, Node::Sym(s, _) if matches!(s.as_str(), "(" | "[" | "{" | "⟨" | "⌊" | "⌈"));
-                if after_op && !opens && !matches!(cl, Some(Class::Rel | Class::Bin | Class::Punct)) {
+                if after_op && !opens && !matches!(cl, Some(Class::Rel | Class::WideRel | Class::Bin | Class::Punct)) {
+                    before = before.max(size * 3.0 / 18.0);
+                }
+                // And one before it after an ordinary atom, a closing delimiter or another operator
+                // (TeX's Ord–Op: `2\cos x`, `c\lim`, `f(x)\sin x`). Not at the start, after a relation
+                // or operator (which have their own space), an opening delimiter or an explicit space.
+                if k > 0 && is_op(item) && !matches!(prev, Some(Class::Rel | Class::WideRel | Class::Bin | Class::Punct)) && !opens_before(list, k) {
                     before = before.max(size * 3.0 / 18.0);
                 }
                 parts.push((layout(f, item, size), before));
@@ -830,14 +924,17 @@ mod tests {
     fn symbols_and_double_struck_letters() {
         let src = r"\{x\in\mathbb{R}\mid x\notin\mathbb{Z}\} \cup A\cap B,\ f\circ g,\ \forall n\in\mathbb{N}\ \exists q\in\mathbb{Q}: \lfloor q\rfloor \le \lceil q\rceil,\ \langle u,v\rangle,\ A\subseteq B \iff \emptyset,\ \neg p \implies \vdots";
         let s = String::from_utf8(to_svg(src, 12.0).0).unwrap();
-        for c in ["ℝ", "ℤ", "ℕ", "ℚ", "|", "∉", "∪", "∩", "∘", "∀", "∃", "⌊", "⌋", "⌈", "⌉", "⟨", "⟩", "⊆", "⇔", "∅", "¬", "⇒", "⋮"]
+        for c in ["ℝ", "ℤ", "ℕ", "ℚ", "|", "∉", "∪", "∩", "∘", "∀", "∃", "⌊", "⌋", "⌈", "⌉", "⟨", "⟩", "⊆", "∅", "¬"]
         {
             assert!(s.contains(&format!(">{c}<")), "{c}: {s}");
         }
+        // `\iff` and `\implies` are long arrows where a face has them, else the short ones.
+        assert!(s.contains(">⟺<") || s.contains(">⇔<"), "{s}");
+        assert!(s.contains(">⟹<") || s.contains(">⇒<"), "{s}");
         assert!(!s.contains(">\\<"), "an unknown command leaked: {s}");
         let db = FontDb::global();
         let f = Fonts::new(db);
-        for c in "ℝℤℕℚℂ∉∪∩∘∀∃⌊⌋⌈⌉⟨⟩⊆⇔∅¬⇒⋮↦∼ℓ".chars() {
+        for c in "ℝℤℕℚℂ∉∪∩∘∀∃⌊⌋⌈⌉⟨⟩⊆⇔∅¬⇒⇐↦∼ℓ".chars() {
             let (fam, face, _) = f.face(c, false);
             assert!(face.glyph_for(c) != 0, "{c} from {fam}");
             // The monospace is the last resort: any serif or sans fallback that has the symbol wins.
@@ -873,6 +970,99 @@ mod tests {
         assert!((w(r"\sin -x") - w(r"\sin") - w("-x") + w("") - thin).abs() < 0.05);
         // `\text{}` is not an operator: no space after it.
         assert!((w(r"\text{if}x") - w(r"\text{if}") - w("x") + w("")).abs() < 0.05);
+    }
+
+    /// TeX's Ord–Op space: an operator name after a number, letter, closing delimiter, script or
+    /// fraction gets a thin space before it too; not at the start, after an opening delimiter, a
+    /// relation, an explicit space or an opening bar.
+    #[test]
+    fn operator_names_take_a_thin_space_before_them() {
+        let w = |src: &str| to_svg(src, 12.0).1.0;
+        let thin = 12.0 * 3.0 / 18.0;
+        // Extra width of `a` followed by `b` over the two set apart.
+        let gap = |a: &str, b: &str| w(&format!("{a}{b}")) - w(a) - w(b) + w("");
+        for (a, b) in
+            [("2", r"\cos x"), ("c", r"\lim_{x} f"), ("x^2", r"\sin x"), ("f(x)", r"\sin x"), (r"\frac{1}{2}", r"\log x"), ("3", r"\cos^2 x")]
+        {
+            assert!((gap(a, b) - thin).abs() < 0.05, "{a} {b}: {}", gap(a, b));
+        }
+        // `\sin\cos x`: one thin space between the names (after one, before the other).
+        assert!((gap(r"\sin", r"\cos x") - thin).abs() < 0.05);
+        for (a, b) in [("(", r"\sin x"), ("[", r"\cos x"), (r"2\,", r"\cos x"), (r"x\quad", r"\lim f"), ("|", r"\sin x|"), ("y=|", r"\cos x|")] {
+            assert!(gap(a, b).abs() < 0.05, "{a} {b}: {}", gap(a, b));
+        }
+        // After a relation or operator only its own space: `=\sin x` as `= x`.
+        let rel = 12.0 * 5.0 / 18.0;
+        assert!((gap("y=", r"\sin x") - rel).abs() < 0.05, "{}", gap("y=", r"\sin x"));
+        assert!((gap("a+", r"\sin x") - 12.0 * 4.0 / 18.0).abs() < 0.05, "{}", gap("a+", r"\sin x"));
+        // The space after the name is unchanged: `2\cos x` is `2`, thin, `\cos`, thin, `x`.
+        assert!((w(r"2\cos x") - w("2") - w(r"\cos") - w("x") + 2.0 * w("") - 2.0 * thin).abs() < 0.05);
+    }
+
+    /// `\iff`, `\implies` and `\impliedby` are long double arrows with TeX's extra thick space
+    /// each side (`\;\Longleftrightarrow\;`); `\Leftrightarrow` stays short with a relation's
+    /// space.
+    #[test]
+    fn iff_is_a_long_arrow_with_wide_spacing() {
+        // Load the fallback faces first: a face another test thread is loading at the same
+        // moment can come back as the default face once, which would change one width below.
+        let _ = Fonts::new(FontDb::global());
+        let w = |src: &str| to_svg(src, 12.0).1.0;
+        let gap = |src: &str, op: &str| w(src) - w("a") - w(op) - w("b") + 2.0 * w("");
+        let (thick, wide) = (12.0 * 5.0 / 18.0, 12.0 * 10.0 / 18.0);
+        for op in [r"\iff", r"\implies", r"\impliedby"] {
+            assert!((gap(&format!("a{op} b"), op) - 2.0 * wide).abs() < 0.05, "{op}");
+        }
+        assert!((gap(r"a\Leftrightarrow b", r"\Leftrightarrow") - 2.0 * thick).abs() < 0.05);
+        assert!((gap(r"a\Longleftrightarrow b", r"\Longleftrightarrow") - 2.0 * thick).abs() < 0.05);
+        let svg = |src: &str| String::from_utf8(to_svg(src, 12.0).0).unwrap();
+        let f = Fonts::new(FontDb::global());
+        for (src, long, short) in [(r"\iff", '⟺', '⇔'), (r"\implies", '⟹', '⇒'), (r"\impliedby", '⟸', '⇐')] {
+            let (_, face, _) = f.face(long, false);
+            let want = if face.glyph_for(long) != 0 { long } else { short };
+            assert!(svg(src).contains(&format!(">{want}<")), "{src}");
+        }
+        // A sign after `\iff` is a sign, not a binary operator.
+        assert!(w(r"a\iff -b") < w(r"a\iff c-b"));
+    }
+
+    /// `\cdots`, `\vdots` and `\ddots` are built from three dots of the serif when it lacks the
+    /// glyph, instead of borrowing a glyph of another design.
+    #[test]
+    fn dots_are_built_from_the_serif() {
+        let f = Fonts::new(FontDb::global());
+        let svg = |src: &str| String::from_utf8(to_svg(src, 12.0).0).unwrap();
+        let ys = |s: &str, dot: &str| -> Vec<(f64, f64)> {
+            s.split("<text ")
+                .filter(|t| t.contains(&format!(">{dot}<")))
+                .filter_map(|t| {
+                    let num = |k: &str| t.split(k).nth(1)?.split('"').next()?.parse::<f64>().ok();
+                    Some((num("x=\"")?, num("y=\"")?))
+                })
+                .collect()
+        };
+        for (src, c, dot) in [(r"\cdots", '⋯', "·"), (r"\vdots", '⋮', "."), (r"\ddots", '⋱', ".")] {
+            let s = svg(src);
+            if f.upright.glyph_for(c) != 0 {
+                assert!(s.contains(&format!(">{c}<")), "{src}");
+                continue;
+            }
+            assert!(!s.contains(&format!(">{c}<")), "{src}: {s}");
+            let p = ys(&s, dot);
+            assert_eq!(p.len(), 3, "{src}: {s}");
+            assert!(s.contains("Source Serif 4"), "{src}: {s}");
+            let (dx, dy) = (p[1].0 - p[0].0, p[1].1 - p[0].1);
+            match c {
+                '⋯' => assert!(dx > 2.0 && dy.abs() < 1e-6 && (p[2].0 - p[1].0 - dx).abs() < 1e-3, "{p:?}"),
+                '⋮' => assert!(dx.abs() < 1e-6 && (dy + 4.8).abs() < 1e-3 && (p[2].1 - p[1].1 - dy).abs() < 1e-3, "{p:?}"),
+                _ => assert!(dx > 0.0 && (dy - 3.6).abs() < 1e-3 && p[2].0 > p[1].0, "{p:?}"),
+            }
+        }
+        // Built dots take part in spacing like the glyph: `a+\cdots+b` keeps its binary spaces.
+        let w = |src: &str| to_svg(src, 12.0).1.0;
+        assert!(w(r"a+\cdots+b") > w(r"\cdots") + w("a+b") - w(""));
+        // `\ldots` is the serif's own ellipsis.
+        assert!(svg(r"\ldots").contains(">…<"));
     }
 
     #[test]
