@@ -972,6 +972,8 @@ mod tests {
         }
     }
 
+    /// Laid-out sizes are plausible (a fraction taller than a letter, limits taller still) and
+    /// the SVG parses and rasterises.
     #[test]
     fn layout_sizes_and_svg() {
         let (svg, (w, h)) = to_svg(r"E = mc^2", 12.0);
