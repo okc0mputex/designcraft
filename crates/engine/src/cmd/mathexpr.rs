@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, cmd, has_doc, str_param};
 use crate::{Result, Session};
 
+/// A graphic item showing `latex` typeset at `size` with `opts`, its top-left at `at`, with
+/// the LaTeX as its alt text.
 fn math_item(
     d: &mut designcraft_doc::Document,
     latex: &str,
@@ -41,6 +43,7 @@ fn math_item(
     it
 }
 
+/// The math commands: `math.insert` and `math.svg`.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -65,6 +68,8 @@ fn opts_param(p: &Value) -> crate::math::Options {
     crate::math::Options { display: p.get("display").and_then(Value::as_bool).unwrap_or(false) }
 }
 
+/// `math.insert`: edits the equation `id` in place, or places a new one inline at the text
+/// insertion point or as a frame.
 fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     let opts = opts_param(p);
     let latex = str_param(p, "latex").ok_or_else(|| bad("math.insert", "`latex` required"))?.to_string();
@@ -114,6 +119,8 @@ mod tests {
 
     use crate::Session;
 
+    /// `math.insert` places a frame that draws, edits it in place by id, and anchors one inline
+    /// at the text insertion point.
     #[test]
     fn math_places_inline_and_as_frames() {
         let mut s = Session::new();

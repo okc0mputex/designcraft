@@ -232,6 +232,7 @@ impl Parser<'_> {
         }
         out
     }
+    /// One argument: a `{…}` group or a single atom (an empty group past the nesting limit).
     fn arg(&mut self) -> Node {
         if self.depth >= MAX_NESTING {
             return Node::Group(Vec::new());
@@ -247,6 +248,8 @@ impl Parser<'_> {
         self.depth -= 1;
         n
     }
+    /// The delimiter after `\left` or `\right`: a character, the one a command names
+    /// (`\{`, `\langle`, …), or none for `.` and unknown commands.
     fn delimiter(&mut self) -> String {
         self.skip_ws();
         match self.peek() {
@@ -287,6 +290,8 @@ impl Parser<'_> {
         self.i = save;
         None
     }
+    /// The next atom: a group, a command, an environment or a character; `None` at the end of
+    /// the input. Scripts after it are left to the caller.
     fn atom(&mut self) -> Option<Node> {
         self.skip_ws();
         let c = self.peek()?;
@@ -372,6 +377,7 @@ impl Parser<'_> {
             c => Node::Sym(c.to_string(), Class::Plain),
         })
     }
+    /// Atoms with their scripts up to `end` (or the end of the input): a group's contents.
     fn list(&mut self, end: Option<char>) -> Vec<Node> {
         if self.depth >= MAX_NESTING {
             return Vec::new();
@@ -413,6 +419,7 @@ impl Parser<'_> {
         self.depth -= 1;
         out
     }
+    /// The contents of a `\left … \right` pair, up to its matching `\right`.
     fn list_until_right(&mut self) -> Vec<Node> {
         if self.depth >= MAX_NESTING {
             return Vec::new();
@@ -461,10 +468,13 @@ impl Parser<'_> {
     }
 }
 
+/// Parse `src` into a node tree, from the top level.
 fn parse(src: &str) -> Node {
     parse_at(src, 0, false)
 }
 
+/// Parse `src` with `depth` levels of nesting already used (nested parses share
+/// [`MAX_NESTING`]), `display` saying whether operator limits stack.
 fn parse_at(src: &str, depth: usize, display: bool) -> Node {
     let chars: Vec<char> = src.chars().collect();
     let mut p = Parser { s: &chars, i: 0, depth, display };
@@ -511,11 +521,13 @@ impl Fonts {
 const FAMILY: &str = designcraft_fonts::DEFAULT_FAMILY;
 const FALLBACK: &str = "Source Sans 3";
 
+/// A box holding `s` at `size` (italic or upright), with the nominal ascent and descent.
 fn text_box(f: &Fonts, s: &str, size: f64, italic: bool) -> MBox {
     let w = f.width(s, size, italic);
     MBox { w, asc: size * 0.72, desc: size * 0.22, els: vec![Elem::Text { x: 0.0, y: 0.0, s: s.to_string(), size, italic }] }
 }
 
+/// `parts` (each with the space before it) side by side on a common baseline.
 fn hbox(parts: Vec<(MBox, f64)>) -> MBox {
     // (box, space before) laid out along the baseline.
     let mut out = MBox::default();
@@ -532,6 +544,7 @@ fn hbox(parts: Vec<(MBox, f64)>) -> MBox {
     out
 }
 
+/// Lay out `n` at `size`: its box, elements placed from its left end on its baseline.
 fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
     let axis = size * 0.25;
     match n {
@@ -721,6 +734,7 @@ pub fn to_svg_with(latex: &str, size: f64, opts: &Options) -> (Vec<u8>, (f64, f6
     render(&parse_at(latex, 0, opts.display), size)
 }
 
+/// Lay out `tree` at `size` and write it as SVG: the bytes and the size in points.
 fn render(tree: &Node, size: f64) -> (Vec<u8>, (f64, f64)) {
     let db = FontDb::global();
     let f = Fonts { upright: db.face(FAMILY, "Regular"), italic: db.face(FAMILY, "Italic"), fallback: db.face(FALLBACK, "Regular") };
@@ -772,6 +786,8 @@ fn render(tree: &Node, size: f64) -> (Vec<u8>, (f64, f64)) {
 mod tests {
     use super::*;
 
+    /// Fractions, roots, scripts, big operators, Greek letters, relations, text and
+    /// `\left … \right` parse to the expected nodes.
     #[test]
     fn parses_the_common_constructs() {
         let n = parse(r"\frac{a^2+b}{\sqrt[3]{x}}");
@@ -846,6 +862,8 @@ mod tests {
         assert!(uh > to_svg(r"\frac{a}{b}", 12.0).1.1 + 2.0, "{uh}");
     }
 
+    /// Laid-out sizes are plausible (a fraction taller than a letter, limits taller still) and
+    /// the SVG parses and rasterises.
     #[test]
     fn layout_sizes_and_svg() {
         let (svg, (w, h)) = to_svg(r"E = mc^2", 12.0);
