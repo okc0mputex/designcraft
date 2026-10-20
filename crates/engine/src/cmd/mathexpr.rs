@@ -48,7 +48,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Math Expression…",
             ["Type"],
             None,
-            "{latex, size?: points (12), display?: bool (false; display style: `\\lim` etc. stack their limits), family?: installed font family (else the bundled serif), x?, y?, spread?} or {id, latex, size?, display?, family?} — at the text insertion point (inline), else as a frame; with `id`: edits that equation, which keeps its family unless `family` is given (\"\" for the bundled serif)",
+            "{latex, size?: points (12), display?: bool (false; display style: `\\lim` etc. stack their limits), family?: installed font family (else the bundled serif), x?, y?, spread?} or {id, latex, size?, display?, family?} — at the text insertion point (inline), else as a frame; with `id`: edits that equation, which keeps its family and style unless `family` (\"\" for the bundled serif) or `display` is given",
             has_doc,
             insert
         ),
@@ -71,6 +71,7 @@ fn opts_param(p: &Value) -> crate::math::Options {
 fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     let mut opts = opts_param(p);
     let keep_family = p.get("family").is_none();
+    let keep_display = p.get("display").is_none();
     let latex = str_param(p, "latex").ok_or_else(|| bad("math.insert", "`latex` required"))?.to_string();
     let size = p.get("size").and_then(Value::as_f64).unwrap_or(12.0).clamp(2.0, 400.0);
     let lid = s.doc()?.active_layer;
@@ -81,13 +82,17 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
             // The path and graphic live in the item's inner space, which `xf` maps to the spread:
             // build the new ones at the old inner corner and keep `xf`.
             let at = old.path.bounds().ok_or_else(|| bad("math.insert", "equation has no geometry"))?;
-            // Without a `family`, the equation stays in the family it was set in.
+            // Without a `family` or `display`, the equation stays in the family and style it was
+            // set in.
+            let svg = match &old.content {
+                Content::Graphic(g) => d.assets.get(&g.asset).map(|a| a.data.clone()),
+                _ => None,
+            };
             if keep_family {
-                let svg = match &old.content {
-                    Content::Graphic(g) => d.assets.get(&g.asset).map(|a| a.data.clone()),
-                    _ => None,
-                };
-                opts.family = svg.and_then(|b| crate::math::family_of(&b));
+                opts.family = svg.as_ref().and_then(|b| crate::math::family_of(b));
+            }
+            if keep_display {
+                opts.display = svg.as_ref().is_some_and(|b| crate::math::display_of(b));
             }
             let it = math_item(d, &latex, size, &opts, lid, (at.x0, at.y0));
             let target = d.item_mut(id).ok_or_else(|| bad("math.insert", "no such object"))?;
@@ -172,6 +177,25 @@ mod tests {
         assert!(r["id"].as_u64().is_some());
     }
 
+    /// An edit that doesn't give `display` keeps the equation's style; giving it changes it.
+    #[test]
+    fn an_edit_keeps_display_style() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let src = r"\lim_{x\to 0} f(x)";
+        let r = s.execute("math.insert", &json!({"latex": src, "display": true, "x": 100, "y": 100})).unwrap();
+        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+        let h = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().bounds().height();
+        let shown = h(&s);
+        s.execute("math.insert", &json!({"id": id.0, "latex": src})).unwrap();
+        assert!((h(&s) - shown).abs() < 1e-6, "{} {shown}", h(&s));
+        s.execute("math.insert", &json!({"id": id.0, "latex": src, "display": false})).unwrap();
+        let inline = h(&s);
+        assert!(inline < shown - 2.0, "{inline} {shown}");
+        s.execute("math.insert", &json!({"id": id.0, "latex": src})).unwrap();
+        assert!((h(&s) - inline).abs() < 1e-6);
+    }
+
     /// The family the equation `id` was set in, read from its SVG.
     fn family(s: &Session, id: designcraft_doc::ItemId) -> Option<String> {
         let d = &s.doc().unwrap().doc;
@@ -226,9 +250,13 @@ mod tests {
         assert_eq!(family(&s, id).as_deref(), Some("Source Sans 3"));
         s.execute("math.insert", &json!({"id": id.0, "latex": "x", "family": ""})).unwrap();
         assert_eq!(family(&s, id), None);
-        // A family that isn't installed: the bundled serif, no error.
+        // A family that isn't installed: set in the bundled serif, no error, and the name kept
+        // through an edit (it is used once the family is installed).
         let r = s.execute("math.insert", &json!({"latex": "x", "family": "No Such Family 7", "x": 100, "y": 300})).unwrap();
-        assert_eq!(family(&s, designcraft_doc::ItemId(r["id"].as_u64().unwrap())), None);
+        let missing = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+        assert_eq!(family(&s, missing).as_deref(), Some("No Such Family 7"));
+        s.execute("math.insert", &json!({"id": missing.0, "latex": "x+1"})).unwrap();
+        assert_eq!(family(&s, missing).as_deref(), Some("No Such Family 7"));
         // Inline equations take it too.
         let f = s.execute("frame.create", &json!({"rect": [72, 400, 400, 500], "content": "text", "text": "Sum: "})).unwrap();
         s.execute("text.select", &json!({"story": f["story"], "anchor": 5, "focus": 5})).unwrap();

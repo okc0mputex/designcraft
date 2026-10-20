@@ -711,22 +711,29 @@ pub struct Options {
     pub display: bool,
     /// The font family its letters, digits and operators are set in (any case); `None`, or a
     /// family that isn't installed, sets it in the bundled serif. Characters the family lacks
-    /// come from the fallback sans, as with the bundled serif.
+    /// come from the fallback sans, as with the bundled serif. The name is kept in the SVG even
+    /// when the family isn't installed ([`family_of`]), so an edit on a machine without it doesn't
+    /// lose it.
     pub family: Option<String>,
+}
+
+/// `name` trimmed, as the SVG's `font-family` can carry it: `None` when empty or with a quote or
+/// backslash.
+fn family_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    (!name.is_empty() && !name.contains(['\'', '"', '\\'])).then_some(name)
 }
 
 /// The installed family `name` names, as the font list spells it: `None` for an unknown family,
 /// and for a name with a quote or backslash, which the SVG's `font-family` couldn't carry.
 fn installed_family(db: &FontDb, name: &str) -> Option<String> {
-    let name = name.trim();
-    if name.is_empty() || name.contains(['\'', '"', '\\']) {
-        return None;
-    }
-    db.scoped(0).canonical_family(name).filter(|f| !f.contains(['\'', '"', '\\']))
+    let name = family_name(name)?;
+    db.scoped(0).canonical_family(name).filter(|f| family_name(f).is_some())
 }
 
-/// The family an expression typeset by [`to_svg_with`] was set in, read back from its SVG:
-/// `None` for the bundled serif (or an SVG this module didn't write).
+/// The family an expression typeset by [`to_svg_with`] was set in, read back from its SVG (as
+/// asked for, if it isn't installed here): `None` for the bundled serif (or an SVG this module
+/// didn't write).
 pub fn family_of(svg: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(svg).ok()?;
     let root = s.get(..s.find('>')?)?;
@@ -735,19 +742,33 @@ pub fn family_of(svg: &[u8]) -> Option<String> {
     Some(name.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")).filter(|n| !n.is_empty())
 }
 
+/// Whether an expression typeset by [`to_svg_with`] was set in display style, read back from its
+/// SVG (false for text style, or an SVG this module didn't write).
+pub fn display_of(svg: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(svg) else { return false };
+    s.find('>').and_then(|end| s.get(..end)).is_some_and(|root| root.contains(DISPLAY_MARK))
+}
+
+/// The root attribute that records display style, so an edit can keep it.
+const DISPLAY_MARK: &str = " data-display=\"true\"";
+
 /// Typeset `latex` at `size` points in text style: SVG bytes and the size in points.
 pub fn to_svg(latex: &str, size: f64) -> (Vec<u8>, (f64, f64)) {
-    render(&parse(latex), size, None)
+    render(&parse(latex), size, None, false)
 }
 
 /// [`to_svg`] with [`Options`].
 pub fn to_svg_with(latex: &str, size: f64, opts: &Options) -> (Vec<u8>, (f64, f64)) {
-    render(&parse_at(latex, 0, opts.display), size, opts.family.as_deref())
+    render(&parse_at(latex, 0, opts.display), size, opts.family.as_deref(), opts.display)
 }
 
-fn render(tree: &Node, size: f64, family: Option<&str>) -> (Vec<u8>, (f64, f64)) {
+/// Lay out `tree` at `size` in `family` (the bundled serif if `None` or not installed) and write
+/// the SVG, recording the family asked for and display style on its root.
+fn render(tree: &Node, size: f64, family: Option<&str>, display: bool) -> (Vec<u8>, (f64, f64)) {
     let db = FontDb::global();
     let chosen = family.and_then(|name| installed_family(db, name));
+    // The name kept on the root: as installed, else as asked for.
+    let named = chosen.clone().or_else(|| family.and_then(family_name).map(str::to_string));
     let fam = chosen.as_deref().unwrap_or(FAMILY);
     let upright = db.face(fam, "Regular");
     // A family without an italic sets italic letters in its upright face, measured as drawn.
@@ -759,10 +780,14 @@ fn render(tree: &Node, size: f64, family: Option<&str>) -> (Vec<u8>, (f64, f64))
     let base = pad + b.asc;
     let mut svg = String::new();
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    // A chosen family is named on the root too, so an edit can set the expression in it again.
-    let root_family = chosen.as_deref().map(|c| format!(" font-family=\"'{}'\"", esc(c))).unwrap_or_default();
-    let _ =
-        write!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.2}pt\" height=\"{h:.2}pt\" viewBox=\"0 0 {w:.3} {h:.3}\"{root_family}>");
+    // A chosen family is named on the root too (even one not installed here), and display style
+    // marked, so an edit can set the expression the same way again.
+    let root_family = named.as_deref().map(|c| format!(" font-family=\"'{}'\"", esc(c))).unwrap_or_default();
+    let root_display = if display { DISPLAY_MARK } else { "" };
+    let _ = write!(
+        svg,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.2}pt\" height=\"{h:.2}pt\" viewBox=\"0 0 {w:.3} {h:.3}\"{root_family}{root_display}>"
+    );
     let fam_attr = esc(fam);
     for e in &b.els {
         match e {
@@ -904,11 +929,22 @@ mod tests {
         assert!((w7 - (adv + 2.4)).abs() < 1e-6, "{w7} {adv}");
         // It has no italic: italic letters are its upright, not a slanted other font.
         assert!(!mono.contains("font-style"), "{mono}");
-        // Unknown families and names the SVG couldn't carry set it as if none were given.
-        for bad in ["No Such Family 7", "", "  ", "Source Serif 4' x='", "a\"b", "back\\slash"] {
+        // Names the SVG couldn't carry set it as if none were given.
+        for bad in ["", "  ", "Source Serif 4' x='", "a\"b", "back\\slash"] {
             let (svg, size) = set(Some(bad));
             assert_eq!((svg.as_str(), size), (serif.as_str(), serif_size), "{bad}");
         }
+        // A family that isn't installed sets it in the bundled serif, but keeps its name on the
+        // root for the next edit.
+        let (missing, size) = set(Some(" No Such Family 7 "));
+        assert_eq!(size, serif_size);
+        assert_eq!(family_of(missing.as_bytes()).as_deref(), Some("No Such Family 7"));
+        let strip = |s: &str| s.replacen(" font-family=\"'No Such Family 7'\"", "", 1);
+        assert_eq!(strip(&missing), serif);
+        // Display style is recorded on the root too.
+        let shown = String::from_utf8(to_svg_with("x", 12.0, &Options { display: true, ..Default::default() }).0).unwrap();
+        assert!(display_of(shown.as_bytes()) && !display_of(serif.as_bytes()), "{shown}");
+        assert!(!display_of(b"<svg><text data-display=\"true\"/></svg>") && !display_of(b"\xff"));
         // A family with an italic keeps it.
         let (sans, _) = set(Some("Source Sans 3"));
         assert!(sans.contains("font-style=\"italic\">f<") && family_of(sans.as_bytes()).as_deref() == Some("Source Sans 3"), "{sans}");
