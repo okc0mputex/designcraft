@@ -99,6 +99,8 @@ enum Class {
     Plain,
 }
 
+/// The character a symbol command (`\alpha`, `\le`, `\to`, …) sets and its spacing class;
+/// `None` for a name that isn't one.
 fn symbol(name: &str) -> Option<(&'static str, Class)> {
     use Class::*;
     Some(match name {
@@ -271,6 +273,7 @@ impl Parser<'_> {
         }
         out
     }
+    /// One argument: a `{…}` group or a single atom (an empty group past the nesting limit).
     fn arg(&mut self) -> Node {
         if self.depth >= MAX_NESTING {
             return Node::Group(Vec::new());
@@ -286,6 +289,8 @@ impl Parser<'_> {
         self.depth -= 1;
         n
     }
+    /// The delimiter after `\left` or `\right`: a character, the one a command names
+    /// (`\{`, `\langle`, …), or none for `.` and unknown commands.
     fn delimiter(&mut self) -> String {
         self.skip_ws();
         match self.peek() {
@@ -317,6 +322,8 @@ impl Parser<'_> {
             None => String::new(),
         }
     }
+    /// The next atom: a group, a command, an environment or a character; `None` at the end of
+    /// the input. Scripts after it are left to the caller.
     fn atom(&mut self) -> Option<Node> {
         self.skip_ws();
         let c = self.peek()?;
@@ -482,10 +489,13 @@ impl Parser<'_> {
     }
 }
 
+/// Parse `src` into a node tree, from the top level.
 fn parse(src: &str) -> Node {
     parse_at(src, 0)
 }
 
+/// Parse `src` with `depth` levels of nesting already used (nested parses share
+/// [`MAX_NESTING`]).
 fn parse_at(src: &str, depth: usize) -> Node {
     let chars: Vec<char> = src.chars().collect();
     let mut p = Parser { s: &chars, i: 0, depth };
@@ -517,6 +527,7 @@ struct Fonts {
 }
 
 impl Fonts {
+    /// The bundled serif (upright and italic) and the fallback faces `db` has, in order.
     fn new(db: &FontDb) -> Fonts {
         let fallbacks =
             FALLBACKS.iter().filter(|(fam, _, bundled)| *bundled || db.has_family(fam)).map(|&(fam, style, _)| (fam, db.face(fam, style))).collect();
@@ -534,6 +545,7 @@ impl Fonts {
             None => (FAMILY, f, italic),
         }
     }
+    /// The advance of `s` at `size`, each character measured in the face that draws it.
     fn width(&self, s: &str, size: f64, italic: bool) -> f64 {
         s.chars()
             .map(|c| {
@@ -551,11 +563,13 @@ const FAMILY: &str = designcraft_fonts::DEFAULT_FAMILY;
 /// DejaVu Serif the output still uses only bundled faces (the browser too).
 const FALLBACKS: [(&str, &str, bool); 3] = [("DejaVu Serif", "Book", false), ("Source Sans 3", "Regular", true), ("JetBrains Mono", "Regular", true)];
 
+/// A box holding `s` at `size` (italic or upright), with the nominal ascent and descent.
 fn text_box(f: &Fonts, s: &str, size: f64, italic: bool) -> MBox {
     let w = f.width(s, size, italic);
     MBox { w, asc: size * 0.72, desc: size * 0.22, els: vec![Elem::Text { x: 0.0, y: 0.0, s: s.to_string(), size, italic }] }
 }
 
+/// `parts` (each with the space before it) side by side on a common baseline.
 fn hbox(parts: Vec<(MBox, f64)>) -> MBox {
     // (box, space before) laid out along the baseline.
     let mut out = MBox::default();
@@ -644,6 +658,7 @@ fn built_dots(f: &Fonts, s: &str, size: f64) -> Option<MBox> {
     Some(MBox { w, asc, desc: size * 0.22, els })
 }
 
+/// Lay out `n` at `size`: its box, elements placed from its left end on its baseline.
 fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
     let axis = size * 0.25;
     match n {
@@ -1092,6 +1107,8 @@ mod tests {
         assert!(svg(r"\ldots").contains(">…<"));
     }
 
+    /// Laid-out sizes are plausible (a fraction taller than a letter, limits taller still) and
+    /// the SVG parses and rasterises.
     #[test]
     fn layout_sizes_and_svg() {
         let (svg, (w, h)) = to_svg(r"E = mc^2", 12.0);
