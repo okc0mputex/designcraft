@@ -48,11 +48,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Math Expression…",
             ["Type"],
             None,
-            "{latex, size?: points (12), display?: bool (false; display style: `\\lim` etc. stack their limits), x?, y?, spread?} or {id, latex, size?, display?} — at the text insertion point (inline), else as a frame; with `id`: edits that equation",
+            "{latex, size?: points (12), display?: bool (false; display style: `\\lim` etc. stack their limits), family?: installed font family (else the bundled serif), x?, y?, spread?} or {id, latex, size?, display?, family?} — at the text insertion point (inline), else as a frame; with `id`: edits that equation, which keeps its family unless `family` is given (\"\" for the bundled serif)",
             has_doc,
             insert
         ),
-        cmd!(query "math.svg", "Math Expression SVG", [], None, "{latex, size?, display?: bool} → {svg, width, height} — typeset without placing", has_doc, |_s, p| {
+        cmd!(query "math.svg", "Math Expression SVG", [], None, "{latex, size?, display?: bool, family?} → {svg, width, height} — typeset without placing", has_doc, |_s, p| {
             let latex = str_param(p, "latex").ok_or_else(|| bad("math.svg", "`latex` required"))?;
             let (svg, (w, h)) = crate::math::to_svg_with(latex, p.get("size").and_then(Value::as_f64).unwrap_or(12.0), &opts_param(p));
             Ok(json!({"svg": String::from_utf8_lossy(&svg), "width": w, "height": h}))
@@ -62,11 +62,15 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// The typesetting options a math command takes.
 fn opts_param(p: &Value) -> crate::math::Options {
-    crate::math::Options { display: p.get("display").and_then(Value::as_bool).unwrap_or(false) }
+    crate::math::Options {
+        display: p.get("display").and_then(Value::as_bool).unwrap_or(false),
+        family: str_param(p, "family").filter(|f| !f.trim().is_empty()).map(str::to_string),
+    }
 }
 
 fn insert(s: &mut Session, p: &Value) -> Result<Value> {
-    let opts = opts_param(p);
+    let mut opts = opts_param(p);
+    let keep_family = p.get("family").is_none();
     let latex = str_param(p, "latex").ok_or_else(|| bad("math.insert", "`latex` required"))?.to_string();
     let size = p.get("size").and_then(Value::as_f64).unwrap_or(12.0).clamp(2.0, 400.0);
     let lid = s.doc()?.active_layer;
@@ -77,6 +81,14 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
             // The path and graphic live in the item's inner space, which `xf` maps to the spread:
             // build the new ones at the old inner corner and keep `xf`.
             let at = old.path.bounds().ok_or_else(|| bad("math.insert", "equation has no geometry"))?;
+            // Without a `family`, the equation stays in the family it was set in.
+            if keep_family {
+                let svg = match &old.content {
+                    Content::Graphic(g) => d.assets.get(&g.asset).map(|a| a.data.clone()),
+                    _ => None,
+                };
+                opts.family = svg.and_then(|b| crate::math::family_of(&b));
+            }
             let it = math_item(d, &latex, size, &opts, lid, (at.x0, at.y0));
             let target = d.item_mut(id).ok_or_else(|| bad("math.insert", "no such object"))?;
             target.path = it.path;
@@ -158,6 +170,69 @@ mod tests {
         assert!(display > text + 2.0, "{text} {display}");
         let r = s.execute("math.insert", &json!({"latex": r"\max_{k} a_k", "display": true, "x": 100, "y": 100})).unwrap();
         assert!(r["id"].as_u64().is_some());
+    }
+
+    /// The family the equation `id` was set in, read from its SVG.
+    fn family(s: &Session, id: designcraft_doc::ItemId) -> Option<String> {
+        let d = &s.doc().unwrap().doc;
+        let designcraft_doc::Content::Graphic(g) = &d.item(id).unwrap().content else { panic!("not a graphic") };
+        crate::math::family_of(&d.assets[&g.asset].data)
+    }
+
+    /// `family` is a documented parameter that sets the equation in that installed family; an
+    /// edit keeps it unless it names another (or `""`, the bundled serif), and it survives a
+    /// save and reopen and an IDML round trip. A family that isn't installed sets the bundled serif.
+    #[test]
+    fn family_sets_the_equation_and_survives_edits() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let svg = s.execute("math.svg", &json!({"latex": "x+1", "family": "JetBrains Mono"})).unwrap();
+        assert!(svg["svg"].as_str().unwrap().contains("'JetBrains Mono'"), "{svg}");
+        let r = s.execute("math.insert", &json!({"latex": r"\frac{a}{b} + 1", "family": "jetbrains mono", "x": 100, "y": 100})).unwrap();
+        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+        assert_eq!(family(&s, id).as_deref(), Some("JetBrains Mono"));
+        // It draws.
+        let d = s.doc().unwrap().doc.clone();
+        let mut rr = designcraft_render::Renderer::new();
+        rr.threads = 0;
+        let img = rr.render_page(&d, &s.cache, 0, 2.0, false, &Default::default()).unwrap();
+        let b = d.item(id).unwrap().bounds();
+        let dark = (b.x0 as u32 * 2..b.x1 as u32 * 2)
+            .flat_map(|x| (b.y0 as u32 * 2..b.y1 as u32 * 2).map(move |y| (x, y)))
+            .filter(|&(x, y)| img.pixel(x, y)[0] < 100)
+            .count();
+        assert!(dark > 30, "{dark}");
+        // An edit that doesn't name a family keeps it, also after a save and reopen.
+        s.execute("math.insert", &json!({"id": id.0, "latex": r"\frac{a}{b} + 2"})).unwrap();
+        assert_eq!(family(&s, id).as_deref(), Some("JetBrains Mono"));
+        let bytes = super::super::file::to_bytes(&s.doc().unwrap().doc).unwrap();
+        let mut s2 = Session::new();
+        s2.execute("file.openBytes", &json!({"name": "eq.designcraft", "base64": super::super::file::base64_encode(&bytes)})).unwrap();
+        assert_eq!(family(&s2, id).as_deref(), Some("JetBrains Mono"));
+        s2.execute("math.insert", &json!({"id": id.0, "latex": "y"})).unwrap();
+        assert_eq!(family(&s2, id).as_deref(), Some("JetBrains Mono"));
+        // IDML embeds the equation's SVG, so an edit after the round trip keeps the family too
+        // (the LaTeX alt text doesn't make that trip yet, so the edit gives it again).
+        let idml = designcraft_idml::export_idml(&s.doc().unwrap().doc);
+        let mut s3 = Session::new();
+        s3.execute("file.openBytes", &json!({"name": "eq.idml", "base64": super::super::file::base64_encode(&idml)})).unwrap();
+        let d3 = &s3.doc().unwrap().doc;
+        let eq = d3.all_items().into_iter().find(|&i| d3.item(i).is_some_and(|it| it.name == "Math")).unwrap();
+        assert_eq!(family(&s3, eq).as_deref(), Some("JetBrains Mono"));
+        s3.execute("math.insert", &json!({"id": eq.0, "latex": "z"})).unwrap();
+        assert_eq!(family(&s3, eq).as_deref(), Some("JetBrains Mono"));
+        // Naming another family switches; "" goes back to the bundled serif.
+        s.execute("math.insert", &json!({"id": id.0, "latex": "x", "family": "Source Sans 3"})).unwrap();
+        assert_eq!(family(&s, id).as_deref(), Some("Source Sans 3"));
+        s.execute("math.insert", &json!({"id": id.0, "latex": "x", "family": ""})).unwrap();
+        assert_eq!(family(&s, id), None);
+        // A family that isn't installed: the bundled serif, no error.
+        let r = s.execute("math.insert", &json!({"latex": "x", "family": "No Such Family 7", "x": 100, "y": 300})).unwrap();
+        assert_eq!(family(&s, designcraft_doc::ItemId(r["id"].as_u64().unwrap())), None);
+        // Inline equations take it too.
+        let f = s.execute("frame.create", &json!({"rect": [72, 400, 400, 500], "content": "text", "text": "Sum: "})).unwrap();
+        s.execute("text.select", &json!({"story": f["story"], "anchor": 5, "focus": 5})).unwrap();
+        assert_eq!(s.execute("math.insert", &json!({"latex": "a+b", "family": "Inter"})).unwrap()["inline"], true);
     }
 
     /// The item's top-left corner in spread space (inner path corner through its transform).
