@@ -526,9 +526,11 @@ impl Fonts {
 }
 
 const FAMILY: &str = designcraft_fonts::DEFAULT_FAMILY;
-/// Fallback faces in order: (family, style, bundled). The bundled ones are always there (in
-/// the browser too), so output only depends on an installed font for a symbol none of them has.
-const FALLBACKS: [(&str, &str, bool); 3] = [("Source Sans 3", "Regular", true), ("JetBrains Mono", "Regular", true), ("DejaVu Serif", "Book", false)];
+/// Fallback faces in order: (family, style, bundled). A serif that has the symbol comes first so
+/// it matches the text (an installed DejaVu Serif), then the bundled sans, and the bundled
+/// monospace only last: its fixed-width advances and shapes stand out in serif maths. Without
+/// DejaVu Serif the output still uses only bundled faces (the browser too).
+const FALLBACKS: [(&str, &str, bool); 3] = [("DejaVu Serif", "Book", false), ("Source Sans 3", "Regular", true), ("JetBrains Mono", "Regular", true)];
 
 fn text_box(f: &Fonts, s: &str, size: f64, italic: bool) -> MBox {
     let w = f.width(s, size, italic);
@@ -594,9 +596,10 @@ fn layout(f: &Fonts, n: &Node, size: f64) -> MBox {
                     before = before.max(size * 3.0 / 18.0);
                 }
                 // A thin space after an operator name (`\sin x`, `\log_2 n`), as TeX's Op–Ord, but
-                // none before a relation, operator, punctuation or an opening delimiter (`\sin(x)`).
-                let opens = matches!(item, Node::Fenced(..))
-                    || matches!(item, Node::Sym(s, _) if matches!(s.as_str(), "(" | "[" | "{" | "⟨" | "⌊" | "⌈" | "|" | "‖"));
+                // none before a relation, operator, punctuation or an opening delimiter (`\sin(x)`). A bare
+                // `|` is an ordinary symbol in TeX, so `\log|x|` keeps the space (`\left|` does not).
+                let opens =
+                    matches!(item, Node::Fenced(..)) || matches!(item, Node::Sym(s, _) if matches!(s.as_str(), "(" | "[" | "{" | "⟨" | "⌊" | "⌈"));
                 if after_op && !opens && !matches!(cl, Some(Class::Rel | Class::Bin | Class::Punct)) {
                     before = before.max(size * 3.0 / 18.0);
                 }
@@ -821,7 +824,8 @@ mod tests {
     }
 
     /// Every glyph written for the new symbols comes from a font that has it: the bundled ones
-    /// cover all but ∖ ∗ ∠, which only an installed DejaVu Serif adds.
+    /// cover all but ∖ ∗ ∠; an installed DejaVu Serif, when there, is preferred to the bundled sans
+    /// and monospace.
     #[test]
     fn symbols_and_double_struck_letters() {
         let src = r"\{x\in\mathbb{R}\mid x\notin\mathbb{Z}\} \cup A\cap B,\ f\circ g,\ \forall n\in\mathbb{N}\ \exists q\in\mathbb{Q}: \lfloor q\rfloor \le \lceil q\rceil,\ \langle u,v\rangle,\ A\subseteq B \iff \emptyset,\ \neg p \implies \vdots";
@@ -831,10 +835,19 @@ mod tests {
             assert!(s.contains(&format!(">{c}<")), "{c}: {s}");
         }
         assert!(!s.contains(">\\<"), "an unknown command leaked: {s}");
-        let f = Fonts::new(FontDb::global());
+        let db = FontDb::global();
+        let f = Fonts::new(db);
         for c in "ℝℤℕℚℂ∉∪∩∘∀∃⌊⌋⌈⌉⟨⟩⊆⇔∅¬⇒⋮↦∼ℓ".chars() {
             let (fam, face, _) = f.face(c, false);
-            assert!(face.glyph_for(c) != 0 && fam != "DejaVu Serif", "{c} from {fam}");
+            assert!(face.glyph_for(c) != 0, "{c} from {fam}");
+            // The monospace is the last resort: any serif or sans fallback that has the symbol wins.
+            if fam == "JetBrains Mono" {
+                assert!(f.fallbacks.iter().filter(|(n, _)| *n != "JetBrains Mono").all(|(_, ff)| ff.glyph_for(c) == 0), "{c} from the monospace");
+            }
+            // An installed DejaVu Serif draws what the text serif lacks.
+            if db.has_family("DejaVu Serif") && f.upright.glyph_for(c) == 0 && db.face("DejaVu Serif", "Book").glyph_for(c) != 0 {
+                assert_eq!(fam, "DejaVu Serif", "{c}");
+            }
         }
         assert_eq!(double_struck('A'), '𝔸');
         assert_eq!(double_struck('x'), 'x');
@@ -852,6 +865,9 @@ mod tests {
             assert!((spaced - thin).abs() < 0.05, "{name}: {spaced}");
         }
         assert!((w(r"\sin(x)") - w(r"\sin") - w("(x)") + w("")).abs() < 0.05);
+        // A bare `|` is ordinary (thin space, as TeX's `\log|x|`); `\left|` opens (none).
+        assert!((w(r"\log|x|") - w(r"\log") - w("|x|") + w("") - thin).abs() < 0.05);
+        assert!((w(r"\log\left|x\right|") - w(r"\log") - w(r"\left|x\right|") + w("")).abs() < 0.05);
         assert!((w(r"\sin\left(x\right)") - w(r"\sin") - w(r"\left(x\right)") + w("")).abs() < 0.05);
         // `\sin -x`: the minus is a sign (no medium spaces around it).
         assert!((w(r"\sin -x") - w(r"\sin") - w("-x") + w("") - thin).abs() < 0.05);
