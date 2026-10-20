@@ -297,6 +297,12 @@ impl Parser<'_> {
                     "|" => "‖".into(),
                     "langle" => "⟨".into(),
                     "rangle" => "⟩".into(),
+                    "lfloor" => "⌊".into(),
+                    "rfloor" => "⌋".into(),
+                    "lceil" => "⌈".into(),
+                    "rceil" => "⌉".into(),
+                    "vert" => "|".into(),
+                    "Vert" => "‖".into(),
                     _ => String::new(),
                 }
             }
@@ -915,6 +921,27 @@ mod tests {
             let Node::Group(v) = parse(src) else { panic!() };
             assert!(matches!(&v[0], Node::Fenced(_, _, c) if c == close), "{src}: {v:?}");
         }
+    }
+
+    /// `\left`/`\right` take the floor, ceiling and bar commands as delimiters (they used to set
+    /// nothing, dropping both brackets); an unknown command still sets none.
+    #[test]
+    fn floor_ceil_and_bars_as_fence_delimiters() {
+        for (src, open, close) in [
+            (r"\left\lfloor x \right\rfloor", "⌊", "⌋"),
+            (r"\left\lceil \frac{n}{2} \right\rceil", "⌈", "⌉"),
+            (r"\left\vert x \right\vert", "|", "|"),
+            (r"\left\Vert x \right\Vert", "‖", "‖"),
+            (r"\left\| x \right\|", "‖", "‖"),
+            (r"\left\langle x \right\rangle", "⟨", "⟩"),
+            (r"\left\lfloor x \right.", "⌊", ""),
+            (r"\left\foo x \right\rceil", "", "⌉"),
+        ] {
+            let Node::Group(v) = parse(src) else { panic!() };
+            assert!(matches!(&v[..], [Node::Fenced(o, _, c)] if o == open && c == close), "{src}: {v:?}");
+        }
+        let svg = String::from_utf8(to_svg(r"\left\lfloor \frac{x}{2} \right\rfloor", 12.0).0).unwrap();
+        assert!(svg.contains(">⌊<") && svg.contains(">⌋<"), "{svg}");
     }
 
     /// Every glyph written for the new symbols comes from a font that has it: the bundled ones
